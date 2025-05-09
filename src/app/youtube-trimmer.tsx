@@ -16,8 +16,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { trimVideoWithFFmpeg } from "@/lib/ffmpeg-trim";
-import VideoTrimmer from "./video-trimmer";
 
 // Dynamically import the YouTube component with SSR disabled
 const YouTube = dynamic(
@@ -40,8 +38,10 @@ export default function YoutubeTrimmer() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [processingStatus, setProcessingStatus] = useState<
-    "preparing" | "processing" | null
+    "preparing" | "processing" | "downloading" | "trimming" | "completed" | null
   >(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadMessage, setDownloadMessage] = useState("");
 
   const [rawStart, setRawStart] = useState("00:00:00");
   const [rawEnd, setRawEnd] = useState("00:00:00");
@@ -138,7 +138,6 @@ export default function YoutubeTrimmer() {
       return;
     }
 
-    // Find the selected format object
     const audioFormat = availableFormat.formats.find(
       (f) => f.resolution === "audio only"
     );
@@ -147,19 +146,20 @@ export default function YoutubeTrimmer() {
       (f) => f.note === selectedResolution
     );
 
-    console.log(selectedFormat, audioFormat, "checkSelectedFormat");
-
     const payload = {
-      url: url, // video URL
-      audio_format_id: audioFormat?.format_id, // audio format id
-      end_time: range[1], // end time
-      format_id: selectedFormat?.format_id, // format id
-      start_time: range[0], // start time
-      is_trim: true, // or false, as needed
+      url: url,
+      audio_format_id: audioFormat?.format_id,
+      end_time: range[1],
+      format_id: selectedFormat?.format_id,
+      start_time: range[0],
+      is_trim: true,
     };
 
     try {
       setIsLoading(true);
+      setProcessingStatus("preparing");
+      setDownloadMessage("Initializing download...");
+
       const res = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -167,12 +167,63 @@ export default function YoutubeTrimmer() {
       });
       const data = await res.json();
 
-      setDownloadLink(data?.data?.downloadable_url);
-      console.log("Download API response:", data);
-      // TODO: handle the response (e.g., show download link, error, etc.)
+      if (data.state === "downloading") {
+        setProcessingStatus("downloading");
+        setDownloadMessage("Starting download process...");
+
+        const taskId = data.data.task_id;
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await fetch("/api/download", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ task_id: taskId }),
+            });
+            const statusData = await statusRes.json();
+
+            if (statusData.state === "downloadable") {
+              console.log("Downloadable response:", statusData);
+              clearInterval(pollInterval);
+              setProcessingStatus("completed");
+              setDownloadMessage("Download ready!");
+              const downloadUrl =
+                statusData.data.downloadable_url || statusData.data.url;
+              console.log("Setting download URL:", downloadUrl);
+              setDownloadLink(downloadUrl);
+              setIsLoading(false);
+            } else if (statusData.state === "downloading") {
+              setProcessingStatus("downloading");
+              setDownloadMessage(statusData.message || "Downloading...");
+              setDownloadProgress(statusData.progress || 0);
+            } else if (statusData.state === "trimming") {
+              setProcessingStatus("trimming");
+              setDownloadMessage("Trimming video...");
+            } else if (statusData.state === "error") {
+              clearInterval(pollInterval);
+              setProcessingStatus(null);
+              setDownloadMessage("Error: " + statusData.message);
+              setIsLoading(false);
+            }
+          } catch (error) {
+            console.error("Error checking status:", error);
+            clearInterval(pollInterval);
+            setProcessingStatus(null);
+            setDownloadMessage("Error checking status");
+            setIsLoading(false);
+          }
+        }, 15000); // Poll every 15 seconds
+      } else if (data.state === "downloadable") {
+        setDownloadLink(data.data.downloadable_url);
+        setIsLoading(false);
+      } else {
+        setProcessingStatus(null);
+        setDownloadMessage("Error: " + data.message);
+        setIsLoading(false);
+      }
     } catch (err) {
       alert("Failed to call download API: " + err);
-    } finally {
+      setProcessingStatus(null);
+      setDownloadMessage("Error: " + err);
       setIsLoading(false);
     }
   };
@@ -578,9 +629,10 @@ export default function YoutubeTrimmer() {
                             d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
                           ></path>
                         </svg>
-                        {processingStatus === "preparing"
-                          ? "Preparing..."
-                          : "Processing..."}
+                        {processingStatus === "preparing" && "Preparing..."}
+                        {processingStatus === "downloading" && "Downloading..."}
+                        {processingStatus === "trimming" && "Trimming..."}
+                        {processingStatus === "completed" && "Completed!"}
                       </>
                     ) : (
                       <>
@@ -598,7 +650,7 @@ export default function YoutubeTrimmer() {
             </div>
           )}
 
-          {downloadLink && (
+          {downloadLink && !isLoading && (
             <div className="mt-8 flex flex-col items-center space-y-4 bg-gray-900/70 border border-blue-500/20 rounded-xl p-6 shadow-lg animate-fade-in">
               <video
                 src={downloadLink}
@@ -625,6 +677,21 @@ export default function YoutubeTrimmer() {
               </span>
             </div>
           </div>
+
+          {/* Add progress bar when processing */}
+          {isLoading && (
+            <div className="mt-4 space-y-4">
+              <div className="w-full bg-gray-900/70 rounded-full h-2 overflow-hidden border border-gray-700/50">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-300"
+                  style={{ width: `${downloadProgress}%` }}
+                ></div>
+              </div>
+              <div className="text-center text-sm text-gray-300">
+                {downloadMessage}
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
