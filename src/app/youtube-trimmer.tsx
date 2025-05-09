@@ -177,7 +177,7 @@ export default function YoutubeTrimmer() {
             const statusRes = await fetch("/api/download", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ task_id: taskId }),
+              body: JSON.stringify(payload),
             });
             const statusData = await statusRes.json();
 
